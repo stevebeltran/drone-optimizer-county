@@ -3,4 +3,3 @@ pandas
 geopandas
 plotly
 shapely
-numpy
