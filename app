@@ -59,7 +59,8 @@ def filter_geo_data(gdf, county_fips, district_name):
     
     if district_name == "SHOW ALL IN SELECTION":
         active_gdf = gdf.to_crs(epsg=4326)
-        boundary = unary_union(active_gdf.geometry)
+        # FIXED: unary_union -> union_all()
+        boundary = active_gdf.geometry.union_all()
     else:
         active_gdf = gdf[gdf[dist_col] == district_name].to_crs(epsg=4326)
         boundary = active_gdf.iloc[0].geometry
@@ -128,9 +129,13 @@ if call_data and station_data and len(shape_components) >= 3:
             dist_choice = "SHOW ALL IN SELECTION"
 
         gdf_all, active_gdf, city_boundary = filter_geo_data(raw_gdf, selected_county_fips, dist_choice)
+        
+        # Calculate UTM Zone
         utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
         epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
-        city_m = active_gdf.to_crs(epsg=epsg_code).unary_union
+        
+        # FIXED: active_gdf.to_crs(...).unary_union -> .union_all()
+        city_m = active_gdf.to_crs(epsg=epsg_code).union_all()
         
         df_calls = pd.read_csv(call_data).dropna(subset=['lat', 'lon'])
         df_stations_all = pd.read_csv(station_data).dropna(subset=['lat', 'lon'])
@@ -168,6 +173,7 @@ if call_data and station_data and len(shape_components) >= 3:
                 u_set = set().union(*(station_metadata[i]['indices'] for i in combo))
                 if len(u_set) > max_calls: max_calls = len(u_set); best_call_combo = combo
                 if strategy == "Maximize Land Equity":
+                    # Note: We keep unary_union here as it works on lists of geometries (from shapely.ops)
                     u_geo = unary_union([station_metadata[i]['clipped_m'] for i in combo])
                     if u_geo.area > max_area: max_area = u_geo.area; best_geo_combo = combo
             
@@ -187,7 +193,6 @@ if call_data and station_data and len(shape_components) >= 3:
                 except: pass
         
         show_suggestions = st.sidebar.toggle("Show Suggested Coverage Sites", value=False)
-        # --- NEW TOGGLE ---
         show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
 
         # --- METRICS ---
@@ -195,6 +200,8 @@ if call_data and station_data and len(shape_components) >= 3:
         active_indices = [s['indices'] for s in active_data]
         all_ids = set().union(*active_indices) if active_indices else set()
         cap_perc = (len(all_ids) / len(calls_in_city)) * 100 if len(calls_in_city) > 0 else 0
+        
+        # Note: shapely.ops.unary_union is okay for lists
         total_union_geo = unary_union([s['clipped_m'] for s in active_data]) if active_data else None
         land_perc = (total_union_geo.area / city_m.area * 100) if total_union_geo else 0
         
@@ -252,7 +259,6 @@ if call_data and station_data and len(shape_components) >= 3:
         with st.sidebar.expander("📝 Tactical Scorecard", expanded=True):
             c_disp = FIPS_MAP.get(selected_county_fips, selected_county_fips) if selected_county_fips != "ALL" else "All Counties"
             
-            # Conditionally add Health Score to text report
             health_text = f"Status: {h_label}\n" if show_health else ""
             
             summary_text = f"""DRONE DEPLOYMENT ANALYSIS
