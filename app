@@ -23,34 +23,48 @@ if st.sidebar.button("🔄 Reset & Upload New Data"):
 st.title("🛰️ Strategic Drone Deployment Optimizer")
 st.markdown("#### **Geospatial Operations Analysis Tool**")
 
+# --- MISSOURI FIPS LOOKUP ---
+FIPS_MAP = {
+    '183': 'St. Charles County',
+    '189': 'St. Louis County',
+    '510': 'St. Louis City',
+    '099': 'Jefferson County',
+    '071': 'Franklin County',
+    '113': 'Lincoln County',
+    '219': 'Warren County',
+    '019': 'Boone County',
+    '095': 'Jackson County',
+    '037': 'Cass County',
+    '047': 'Clay County',
+    '165': 'Platte County',
+    '077': 'Greene County'
+}
+
 # --- SPEED OPTIMIZATION: CACHING ---
 @st.cache_data
 def load_shapefile(shp_path):
     gdf = gpd.read_file(shp_path)
     if gdf.crs is None: gdf.set_crs(epsg=4269, inplace=True)
-    # Simplify geometry slightly for speed
     gdf['geometry'] = gdf['geometry'].simplify(0.0001, preserve_topology=True)
     return gdf
 
-def filter_geo_data(gdf, county_filter, district_filter):
-    # 1. Filter by County if applicable
-    # Common census columns: 'COUNTYFP', 'CNTYID', 'FP_COUNTY'
-    county_col = next((c for c in ['COUNTYFP', 'CNTYID', 'FP_COUNTY'] if c in gdf.columns), None)
-    
-    if county_filter and county_filter != "ALL COUNTIES" and county_col:
-        gdf = gdf[gdf[county_col] == county_filter]
+def filter_geo_data(gdf, county_fips, district_name):
+    if county_fips and county_fips != "ALL":
+        if 'COUNTYFP' in gdf.columns:
+            gdf = gdf[gdf['COUNTYFP'] == county_fips]
+        elif 'CNTYID' in gdf.columns:
+            gdf = gdf[gdf['CNTYID'] == county_fips]
 
-    # 2. Filter by District/Jurisdiction
-    name_col = 'DISTRICT' if 'DISTRICT' in gdf.columns else 'NAME'
+    dist_col = next((c for c in ['NAMELSAD', 'NAME', 'DISTRICT'] if c in gdf.columns), gdf.columns[0])
     
-    if district_filter == "SHOW ALL IN SELECTION":
+    if district_name == "SHOW ALL IN SELECTION":
         active_gdf = gdf.to_crs(epsg=4326)
         boundary = unary_union(active_gdf.geometry)
     else:
-        active_gdf = gdf[gdf[name_col] == district_filter].to_crs(epsg=4326)
+        active_gdf = gdf[gdf[dist_col] == district_name].to_crs(epsg=4326)
         boundary = active_gdf.iloc[0].geometry
 
-    return gdf, active_gdf, boundary, name_col
+    return gdf, active_gdf, boundary
 
 # --- 3. DATA IMPORT ---
 call_data, station_data, shot_data, shape_components = None, None, None, []
@@ -83,39 +97,37 @@ if call_data and station_data and len(shape_components) >= 3:
     
     try:
         shp_path = [os.path.join("temp", f.name) for f in shape_components if f.name.endswith('.shp')][0]
-        
-        # Load Raw GDF
         raw_gdf = load_shapefile(shp_path)
         
         st.markdown("---")
         ctrl_col1, ctrl_col2 = st.columns([1, 2])
         
-        # --- NEW: COUNTY SELECTION LOGIC ---
-        county_col = next((c for c in ['COUNTYFP', 'CNTYID', 'FP_COUNTY'] if c in raw_gdf.columns), None)
-        county_choice = "ALL COUNTIES"
+        county_id_col = next((c for c in ['COUNTYFP', 'CNTYID', 'FP_COUNTY'] if c in raw_gdf.columns), None)
+        selected_county_fips = "ALL"
         
-        if county_col:
-            unique_counties = sorted(raw_gdf[county_col].unique().tolist())
-            # Add a County Selector if valid column found
-            county_choice = ctrl_col1.selectbox("🏛️ Filter by County ID", ["ALL COUNTIES"] + unique_counties)
+        if county_id_col:
+            unique_fips = sorted(raw_gdf[county_id_col].astype(str).unique().tolist())
+            def format_county_name(fips_code):
+                if fips_code == "ALL": return "ALL COUNTIES"
+                return FIPS_MAP.get(fips_code, f"County {fips_code}")
+
+            selected_county_fips = ctrl_col1.selectbox("🏛️ Filter by County", ["ALL"] + unique_fips, format_func=format_county_name)
             
-            # Filter the list of available districts based on county choice
-            if county_choice != "ALL COUNTIES":
-                filtered_view = raw_gdf[raw_gdf[county_col] == county_choice]
+            if selected_county_fips != "ALL":
+                filtered_view = raw_gdf[raw_gdf[county_id_col].astype(str) == selected_county_fips]
             else:
                 filtered_view = raw_gdf
         else:
             filtered_view = raw_gdf
 
-        # District Selection (Dependent on County)
-        name_col_init = 'DISTRICT' if 'DISTRICT' in filtered_view.columns else 'NAME'
-        dist_options = ["SHOW ALL IN SELECTION"] + sorted(filtered_view[name_col_init].unique().tolist())
-        dist_choice = ctrl_col1.selectbox("📍 Active Jurisdiction", dist_options)
+        dist_col_name = next((c for c in ['NAMELSAD', 'NAME', 'DISTRICT'] if c in filtered_view.columns), None)
+        if dist_col_name:
+            dist_options = ["SHOW ALL IN SELECTION"] + sorted(filtered_view[dist_col_name].astype(str).unique().tolist())
+            dist_choice = ctrl_col1.selectbox(f"📍 Active Jurisdiction ({dist_col_name})", dist_options)
+        else:
+            dist_choice = "SHOW ALL IN SELECTION"
 
-        # Process Final Geometry
-        gdf_all, active_gdf, city_boundary, name_col = filter_geo_data(raw_gdf, county_choice, dist_choice)
-        
-        # Calculate UTM Zone
+        gdf_all, active_gdf, city_boundary = filter_geo_data(raw_gdf, selected_county_fips, dist_choice)
         utm_zone = int((city_boundary.centroid.x + 180) / 6) + 1
         epsg_code = f"326{utm_zone}" if city_boundary.centroid.y > 0 else f"327{utm_zone}"
         city_m = active_gdf.to_crs(epsg=epsg_code).unary_union
@@ -128,7 +140,7 @@ if call_data and station_data and len(shape_components) >= 3:
         calls_in_city['point_idx'] = range(len(calls_in_city))
         
         # PRE-CALC
-        radius_m = 3218.69 # 2 Miles
+        radius_m = 3218.69 
         station_metadata = []
         for i, row in df_stations_all.iterrows():
             s_pt_m = gpd.GeoSeries([Point(row['lon'], row['lat'])], crs="EPSG:4326").to_crs(epsg=epsg_code).iloc[0]
@@ -139,7 +151,6 @@ if call_data and station_data and len(shape_components) >= 3:
 
         # OPTIMIZER
         st.sidebar.header("🎯 Optimizer Controls")
-        
         k = st.sidebar.slider("Drones to Deploy", 0, len(station_metadata), min(2, len(station_metadata)))
         strategy = st.sidebar.radio("Optimization Goal", ("Maximize Call Volume", "Maximize Land Equity"))
 
@@ -163,11 +174,10 @@ if call_data and station_data and len(shape_components) >= 3:
             default_sel = [station_metadata[i]['name'] for i in (best_call_combo if strategy == "Maximize Call Volume" else (best_geo_combo if best_geo_combo != -1 else best_call_combo))]
             active_names = ctrl_col2.multiselect("📡 Current Drone List", options=df_stations_all['name'].tolist(), default=default_sel)
         
-        # --- LAYER CONTROLS ---
+        # LAYER CONTROLS
         st.sidebar.markdown("---")
         st.sidebar.header("🔍 Layer Controls")
         
-        # Shot Detection
         show_shots = False
         df_shots = None
         if shot_data:
@@ -176,8 +186,9 @@ if call_data and station_data and len(shape_components) >= 3:
                 try: df_shots = pd.read_csv(shot_data)
                 except: pass
         
-        # Suggested Sites
         show_suggestions = st.sidebar.toggle("Show Suggested Coverage Sites", value=False)
+        # --- NEW TOGGLE ---
+        show_health = st.sidebar.toggle("Show Health Score Banner", value=True)
 
         # --- METRICS ---
         active_data = [s for s in station_metadata if s['name'] in active_names]
@@ -193,71 +204,70 @@ if call_data and station_data and len(shape_components) >= 3:
             inters = [active_bufs[i].intersection(active_bufs[j]) for i in range(len(active_bufs)) for j in range(i+1, len(active_bufs)) if not active_bufs[i].intersection(active_bufs[j]).is_empty]
             overlap_perc = (unary_union(inters).area / city_m.area * 100) if inters else 0.0
 
-        # --- GENERATOR LOGIC ---
         suggested_coords = []
         if land_perc < 99.0:
             current_covered = total_union_geo if total_union_geo else Polygon()
             uncovered_poly = city_m.difference(current_covered)
             max_iterations = 25 
-            
             for _ in range(max_iterations):
                 if uncovered_poly.is_empty or (uncovered_poly.area / city_m.area) < 0.01: break 
-                
                 if isinstance(uncovered_poly, MultiPolygon):
                     valid_geoms = [g for g in uncovered_poly.geoms if g.area > 1000] 
                     if not valid_geoms: break
                     target_chunk = max(valid_geoms, key=lambda g: g.area)
                 else:
                     target_chunk = uncovered_poly
-                
                 new_site_pt = target_chunk.representative_point()
                 p_geo = gpd.GeoSeries([new_site_pt], crs=epsg_code).to_crs(epsg=4326).iloc[0]
                 suggested_coords.append({'lat': p_geo.y, 'lon': p_geo.x})
-                
                 new_coverage = new_site_pt.buffer(radius_m)
                 uncovered_poly = uncovered_poly.difference(new_coverage)
 
-        # --- HEALTH SCORE ---
-        norm_redundancy = min(overlap_perc / 39.0, 1.0) * 100
-        health_score = (cap_perc * 0.50) + (land_perc * 0.25) + (norm_redundancy * 0.25)
+        # HEALTH SCORE DISPLAY LOGIC
+        if show_health:
+            norm_redundancy = min(overlap_perc / 39.0, 1.0) * 100
+            health_score = (cap_perc * 0.50) + (land_perc * 0.25) + (norm_redundancy * 0.25)
 
-        if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
-        elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
-        elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
-        else: h_color, h_label = "#dc3545", "CRITICAL"
+            if health_score >= 85: h_color, h_label = "#28a745", "OPTIMAL"
+            elif health_score >= 75: h_color, h_label = "#94c11f", "SUFFICIENT"
+            elif health_score >= 55: h_color, h_label = "#ffc107", "MARGINAL"
+            else: h_color, h_label = "#dc3545", "CRITICAL"
 
-        # BANNER
-        st.markdown(f"""
-            <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
-                <span style="font-size: 1.2em; font-weight: bold;">Department Health Score: {health_score:.1f}%</span>
-                <span style="font-size: 1.1em; background: rgba(0,0,0,0.2); padding: 2px 10px; border-radius: 4px;">{h_label}</span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""
+                <div style="background-color: {h_color}; padding: 10px; border-radius: 5px; color: white; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 1.2em; font-weight: bold;">Department Health Score: {health_score:.1f}%</span>
+                    <span style="font-size: 1.1em; background: rgba(0,0,0,0.2); padding: 2px 10px; border-radius: 4px;">{h_label}</span>
+                </div>
+                """, unsafe_allow_html=True)
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Response Capacity", f"{cap_perc:.1f}%")
-        m2.metric("Land Covered", f"{land_perc:.1f}%")
-        m3.metric("Redundancy", f"{overlap_perc:.1f}%")
-        m4.metric("Uncovered Calls", f"{len(calls_in_city) - len(all_ids):,}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total Calls", f"{len(calls_in_city):,}")
+        m2.metric("Response Capacity", f"{cap_perc:.1f}%")
+        m3.metric("Land Covered", f"{land_perc:.1f}%")
+        m4.metric("Redundancy", f"{overlap_perc:.1f}%")
+        m5.metric("Uncovered Calls", f"{len(calls_in_city) - len(all_ids):,}")
 
-        # --- SIDEBAR SCORECARD ---
+        # SIDEBAR SCORECARD
         st.sidebar.markdown("---")
         with st.sidebar.expander("📝 Tactical Scorecard", expanded=True):
+            c_disp = FIPS_MAP.get(selected_county_fips, selected_county_fips) if selected_county_fips != "ALL" else "All Counties"
+            
+            # Conditionally add Health Score to text report
+            health_text = f"Status: {h_label}\n" if show_health else ""
+            
             summary_text = f"""DRONE DEPLOYMENT ANALYSIS
 ---------------------------------
-County Filter: {county_choice}
+County: {c_disp}
 Jurisdiction: {dist_choice}
+Total Calls: {len(calls_in_city):,}
 Coverage: {land_perc:.1f}%
-Status: {h_label}
-
+{health_text}
 DEPLOYED ASSETS:
 """ + "\n".join([f"✅ {name}" for name in active_names])
-            
             if suggested_coords and show_suggestions:
                 summary_text += "\n\n⚠️ SUGGESTED EXPANSIONS:\n"
                 for i, c in enumerate(suggested_coords):
                     summary_text += f"📍 Site {i+1}: {c['lat']:.5f}, {c['lon']:.5f}\n"
-
             st.text_area("Copy Report:", summary_text, height=300)
 
         if suggested_coords and show_suggestions:
@@ -266,10 +276,9 @@ DEPLOYED ASSETS:
             for i, c in enumerate(suggested_coords):
                 st.sidebar.code(f"{c['lat']:.5f}, {c['lon']:.5f}", language="text")
 
-        # --- THE MAP ---
+        # MAP
         fig = go.Figure()
         
-        # 1. District Lines
         for _, row in gdf_all.to_crs(epsg=4326).iterrows():
             geom = row.geometry
             p_list = [geom] if isinstance(geom, Polygon) else list(geom.geoms)
@@ -277,7 +286,6 @@ DEPLOYED ASSETS:
                 bx, by = p.exterior.coords.xy
                 fig.add_trace(go.Scattermap(mode="lines", lon=list(bx), lat=list(by), line=dict(color="#444", width=1), showlegend=False, hoverinfo='skip'))
         
-        # 2. Incidents
         sample = calls_in_city.to_crs(epsg=4326).sample(min(2000, len(calls_in_city)))
         fig.add_trace(go.Scattermap(
             lat=sample.geometry.y, 
@@ -288,7 +296,6 @@ DEPLOYED ASSETS:
             hoverinfo='skip'
         ))
 
-        # 3. Shot Detection
         if show_shots and df_shots is not None:
              fig.add_trace(go.Scattermap(
                 lat=df_shots['lat'],
@@ -300,13 +307,11 @@ DEPLOYED ASSETS:
                 hoverinfo='text+lat+lon'
             ))
 
-        # 4. SUGGESTED SITES
         if show_suggestions:
             for i, c in enumerate(suggested_coords):
                 angles = np.linspace(0, 2*np.pi, 100)
                 clats = c['lat'] + (2/69.172) * np.sin(angles)
                 clons = c['lon'] + (2/(69.172 * np.cos(np.radians(c['lat'])))) * np.cos(angles)
-                
                 fig.add_trace(go.Scattermap(
                     lat=list(clats), lon=list(clons), 
                     mode='markers', marker=dict(size=4, color='#FF00FF'), 
@@ -319,14 +324,12 @@ DEPLOYED ASSETS:
                     name=f"Suggestion {i+1}", hoverinfo='text'
                 ))
         
-        # 5. Active Stations
         all_st_names = df_stations_all['name'].tolist()
         for s in active_data:
             color = STATION_COLORS[all_st_names.index(s['name']) % len(STATION_COLORS)]
             angles = np.linspace(0, 2*np.pi, 60)
             clats = s['lat'] + (2/69.172) * np.sin(angles)
             clons = s['lon'] + (2/(69.172 * np.cos(np.radians(s['lat'])))) * np.cos(angles)
-            
             fig.add_trace(go.Scattermap(
                 lat=list(clats) + [clats[0]], lon=list(clons) + [clons[0]], 
                 mode='lines', line=dict(color=color, width=4.5), 
